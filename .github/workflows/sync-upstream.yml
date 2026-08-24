@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: sync-official-upstream
@@ -15,7 +14,7 @@ concurrency:
 
 jobs:
   sync:
-    name: Update official-sync and open integration PR
+    name: Update official-sync
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,9 +35,9 @@ jobs:
           git merge --ff-only upstream/main
           git push origin HEAD:official-sync
 
-      - name: Open a pull request into develop when needed
+      - name: Report integration status
         env:
-          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin develop
@@ -47,20 +46,11 @@ jobs:
             exit 0
           fi
 
-          existing_pr="$(gh pr list \
-            --base develop \
-            --head official-sync \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')"
-
-          if [ -n "${existing_pr}" ]; then
-            echo "Integration PR #${existing_pr} is already open."
-            exit 0
-          fi
-
-          gh pr create \
-            --base develop \
-            --head official-sync \
-            --title "chore: sync official upstream" \
-            --body $'## 变更描述 / Description\n\n将官方 `QuantumNous/new-api` 的最新提交集成到 `develop`。此 PR 必须经过 CI、冲突审查和预发布验证，不应自动合并。\n\n## 变更类型 / Type of change\n\n- [x] ⚡ 性能优化 / 重构 (Refactor)\n\n## 提交前检查项 / Checklist\n\n- [ ] 已审查官方变更和迁移说明\n- [ ] CI 已通过\n- [ ] 已在预发布环境完成核心流程回归\n- [ ] 已准备数据库备份与回滚方案\n\n## 运行证明 / Proof of Work\n\n请在合并前补充 CI 和预发布验证记录。'
+          compare_url="https://github.com/${REPOSITORY}/compare/develop...official-sync?expand=1"
+          {
+            echo "## Official updates are ready"
+            echo
+            echo "The mirror branch was updated. Review the official changes, then create the integration pull request manually so required pull-request CI runs."
+            echo
+            echo "[Create official-sync -> develop pull request](${compare_url})"
+          } >> "${GITHUB_STEP_SUMMARY}"
