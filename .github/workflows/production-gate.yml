@@ -1,0 +1,36 @@
+name: Production gate
+
+on:
+  pull_request:
+    branches: [production]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-source:
+    name: Require release from develop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [ "${SOURCE_BRANCH}" != "develop" ]; then
+            echo "Production releases must be proposed from develop; got ${SOURCE_BRANCH}."
+            exit 1
+          fi
+
+      - name: Reject draft releases
+        env:
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if [ "${IS_DRAFT}" = "true" ]; then
+            echo "Mark the release pull request ready for review before promotion."
+            exit 1
+          fi
