@@ -19,6 +19,11 @@ func SetApiRouter(router *gin.Engine) {
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
 	anonymousRequestBodyLimit := middleware.AnonymousRequestBodyLimit()
 	{
+		apiRouter.POST("/v1/auth/desktop-session/exchange", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.DesktopSessionExchange)
+		apiRouter.GET("/v1/auth/me", middleware.DisableCache(), controller.DesktopAuthMe)
+		apiRouter.POST("/v1/auth/refresh", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.DesktopAuthRefresh)
+		apiRouter.POST("/v1/auth/logout", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.DesktopAuthLogout)
+
 		apiRouter.GET("/setup", controller.GetSetup)
 		apiRouter.POST("/setup", anonymousRequestBodyLimit, controller.PostSetup)
 		apiRouter.GET("/status", controller.GetStatus)

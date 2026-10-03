@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 const userCacheSchemaVersion = 2
@@ -84,7 +85,21 @@ func updateUserCache(user User) error {
 	return writeUserCache(user.ToBaseUser(), false)
 }
 
-// GetUserCache gets complete user cache from hash
+// GetUserCacheWithTx reads the authoritative user row inside the caller transaction.
+// It intentionally bypasses Redis so transaction-scoped authentication checks do not
+// open a second database connection or observe a stale cache snapshot.
+func GetUserCacheWithTx(tx *gorm.DB, userId int) (*UserBase, error) {
+	if tx == nil || userId <= 0 {
+		return nil, fmt.Errorf("invalid user id")
+	}
+	var user User
+	if err := tx.First(&user, userId).Error; err != nil {
+		return nil, err
+	}
+	return user.ToBaseUser(), nil
+}
+
+// GetUserCache gets complete user cache from hash.
 func GetUserCache(userId int) (*UserBase, error) {
 	// Try getting from Redis first
 	userCache, err := cacheGetUserBase(userId)

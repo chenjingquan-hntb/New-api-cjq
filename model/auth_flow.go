@@ -17,6 +17,8 @@ import (
 const (
 	AuthFlowPurposeOAuth             = "oauth"
 	AuthFlowPurposeTwoFALogin        = "2fa_login"
+	AuthFlowPurposeLoginVerification = "login_verification"
+	AuthFlowPurposeLoginPasskey      = "login_passkey"
 	AuthFlowPurposePasskeyLogin      = "passkey_login"
 	AuthFlowPurposePasskeyRegister   = "passkey_register"
 	AuthFlowPurposePasskeyStepUp     = "passkey_step_up"
@@ -24,6 +26,12 @@ const (
 	AuthFlowPurposeTelegramAssertion = "telegram_assertion"
 	AuthFlowIntentLogin              = "login"
 	AuthFlowIntentBind               = "bind"
+	AuthFlowIntentVerify             = "verify"
+	AuthFlowPurposeTwoFASetup        = "2fa_setup"
+	AuthFlowPurposeSecurityProof     = "security_proof"
+	AuthFlowPurposeEmailBinding      = "email_binding"
+	AuthFlowPurposeDesktopBridge     = "desktop_bridge"
+	AuthFlowPurposeDesktopCode       = "desktop_code"
 	AuthFlowTokenBytes               = 32
 	AuthFlowDefaultCleanupRetention  = 24 * time.Hour
 )
@@ -61,6 +69,7 @@ type AuthFlowCreate struct {
 	UserId    int
 	SessionId string
 	Payload   string
+	Token     string
 	ExpiresAt time.Time
 }
 
@@ -70,6 +79,47 @@ type AuthFlowMatch struct {
 	Intent    string
 	UserId    int
 	SessionId string
+}
+
+// AuthSessionIdentity binds an authentication flow to a specific session version.
+type AuthSessionIdentity struct {
+	UserID          int    `json:"user_id"`
+	SessionID       string `json:"session_id"`
+	UserAuthVersion int64  `json:"auth_version"`
+	SessionVersion  int64  `json:"session_version"`
+}
+
+// AuthFlowAuthorization is server-owned state carried into a configuration flow
+// after a proof has been consumed. ProofID is a database ID, never the proof token.
+type AuthFlowAuthorization struct {
+	AuthSessionIdentity
+	ProofID     int64  `json:"proof_id"`
+	Scope       string `json:"scope"`
+	ContextHash string `json:"context_hash"`
+	Method      string `json:"method"`
+}
+
+// ValidateAuthSessionWithTx rechecks the authoritative identity while holding the
+// user/session locks until the caller's credential change or flow consumption commits.
+func ValidateAuthSessionWithTx(tx *gorm.DB, identity AuthSessionIdentity) error {
+	if identity.UserID <= 0 || identity.SessionID == "" || identity.UserAuthVersion <= 0 || identity.SessionVersion <= 0 {
+		return ErrUserSessionInactive
+	}
+	var user User
+	if err := lockForUpdate(tx).First(&user, identity.UserID).Error; err != nil {
+		return err
+	}
+	if user.Status != common.UserStatusEnabled || user.AuthVersion != identity.UserAuthVersion {
+		return ErrUserSessionInactive
+	}
+	var session UserSession
+	if err := lockForUpdate(tx).Where("sid = ? AND user_id = ?", identity.SessionID, identity.UserID).First(&session).Error; err != nil {
+		return err
+	}
+	if session.Status != UserSessionStatusActive || session.RevokedAt != 0 || session.ExpiresAt <= time.Now().Unix() || session.UserAuthVersion != identity.UserAuthVersion || session.Version != identity.SessionVersion {
+		return ErrUserSessionInactive
+	}
+	return nil
 }
 
 func applyAuthFlowMatch(query *gorm.DB, token string, match AuthFlowMatch) *gorm.DB {
@@ -94,14 +144,27 @@ func authFlowTokenHash(token string) string {
 }
 
 func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
-	if strings.TrimSpace(input.Purpose) == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
+	return createAuthFlowWithTx(DB, input)
+}
+
+// CreateAuthFlowWithTx creates a one-time flow in the caller transaction.
+// Callers use it when flow issuance must commit atomically with another state transition.
+func CreateAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow, error) {
+	return createAuthFlowWithTx(tx, input)
+}
+
+func createAuthFlowWithTx(tx *gorm.DB, input AuthFlowCreate) (string, *AuthFlow, error) {
+	if tx == nil || strings.TrimSpace(input.Purpose) == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
 		return "", nil, ErrAuthFlowInvalid
 	}
-	random := make([]byte, AuthFlowTokenBytes)
-	if _, err := rand.Read(random); err != nil {
-		return "", nil, fmt.Errorf("generate auth flow token: %w", err)
+	token := strings.TrimSpace(input.Token)
+	if token == "" {
+		random := make([]byte, AuthFlowTokenBytes)
+		if _, err := rand.Read(random); err != nil {
+			return "", nil, fmt.Errorf("generate auth flow token: %w", err)
+		}
+		token = base64.RawURLEncoding.EncodeToString(random)
 	}
-	token := base64.RawURLEncoding.EncodeToString(random)
 	flow := &AuthFlow{
 		TokenHash: authFlowTokenHash(token),
 		Purpose:   input.Purpose,
@@ -112,7 +175,7 @@ func CreateAuthFlow(input AuthFlowCreate) (string, *AuthFlow, error) {
 		Payload:   input.Payload,
 		ExpiresAt: input.ExpiresAt,
 	}
-	if err := DB.Create(flow).Error; err != nil {
+	if err := tx.Create(flow).Error; err != nil {
 		return "", nil, err
 	}
 	return token, flow, nil
@@ -190,41 +253,55 @@ func ConsumeAuthFlowWithAction(token string, match AuthFlowMatch, action func(tx
 	if token == "" || match.Purpose == "" {
 		return nil, ErrAuthFlowInvalid
 	}
-	var consumed AuthFlow
+	var consumed *AuthFlow
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		query := applyAuthFlowMatch(lockForUpdate(tx), token, match)
-		if err := query.First(&consumed).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrAuthFlowInvalid
-			}
-			return err
-		}
-		if consumed.ConsumedAt != nil {
-			return ErrAuthFlowConsumed
-		}
-		now := time.Now()
-		if !consumed.ExpiresAt.After(now) {
-			return ErrAuthFlowExpired
-		}
-		result := tx.Model(&AuthFlow{}).
-			Where("id = ? AND consumed_at IS NULL AND expires_at > ?", consumed.Id, now).
-			Update("consumed_at", now)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrAuthFlowConsumed
-		}
-		consumed.ConsumedAt = &now
-		if action != nil {
-			if err := action(tx, &consumed); err != nil {
-				return err
-			}
-		}
-		return nil
+		var err error
+		consumed, err = ConsumeAuthFlowWithActionTx(tx, token, match, action)
+		return err
 	})
 	if err != nil {
 		return nil, err
+	}
+	return consumed, nil
+}
+
+// ConsumeAuthFlowWithActionTx atomically validates and consumes a flow in the
+// caller transaction. The action can create state that must commit together
+// with the one-time claim.
+func ConsumeAuthFlowWithActionTx(tx *gorm.DB, token string, match AuthFlowMatch, action func(tx *gorm.DB, flow *AuthFlow) error) (*AuthFlow, error) {
+	if tx == nil || token == "" || match.Purpose == "" {
+		return nil, ErrAuthFlowInvalid
+	}
+	var consumed AuthFlow
+	// Claim with the first write, rather than upgrading a prior read lock.
+	// SQLite cannot reliably upgrade two concurrent deferred read transactions.
+	now := time.Now()
+	result := applyAuthFlowMatch(tx.Model(&AuthFlow{}), token, match).
+		Where("consumed_at IS NULL AND expires_at > ?", now).
+		Update("consumed_at", now)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	query := applyAuthFlowMatch(tx, token, match)
+	if err := query.First(&consumed).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrAuthFlowInvalid
+		}
+		return nil, err
+	}
+	if result.RowsAffected != 1 && consumed.ConsumedAt != nil {
+		return nil, ErrAuthFlowConsumed
+	}
+	if !consumed.ExpiresAt.After(time.Now()) {
+		return nil, ErrAuthFlowExpired
+	}
+	if result.RowsAffected != 1 {
+		return nil, ErrAuthFlowInvalid
+	}
+	if action != nil {
+		if err := action(tx, &consumed); err != nil {
+			return nil, err
+		}
 	}
 	return &consumed, nil
 }

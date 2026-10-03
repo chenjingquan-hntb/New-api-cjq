@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -206,6 +207,23 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == desktopGroupRegistryKey {
+		return errors.New("desktop group registry is managed internally")
+	}
+	if isDesktopGroupOption(key) {
+		var groups map[string]float64
+		if err := common.UnmarshalJsonStr(value, &groups); err != nil {
+			return err
+		}
+		if groups == nil {
+			return errors.New("group configuration must be an object")
+		}
+		for name, ratio := range groups {
+			if name == "" || ratio < 0 {
+				return errors.New("invalid group configuration")
+			}
+		}
+	}
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)
 	}
@@ -219,21 +237,23 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	if isDesktopGroupOption(key) {
+		return UpdateOptionsBulk(map[string]string{key: value})
+	}
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
-	// Save to database first
-	option := Option{
-		Key: key,
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		option := Option{Key: key}
+		if err := tx.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+			return err
+		}
+		option.Value = value
+		return tx.Save(&option).Error
+	})
+	if err != nil {
+		return err
 	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
-	// Update OptionMap
 	return updateOptionMap(key, value)
 }
 
@@ -246,19 +266,48 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
 	}
+	var groupValue string
 	for key, value := range values {
 		if err := validateOptionValue(key, value); err != nil {
 			return err
 		}
+		if !isDesktopGroupOption(key) {
+			continue
+		}
+		if groupValue != "" && groupValue != value {
+			return errors.New("group configuration aliases must match")
+		}
+		groupValue = value
+	}
+	updates := make(map[string]string, len(values)+2)
+	for key, value := range values {
+		updates[key] = value
+	}
+	if groupValue != "" {
+		updates["GroupRatio"] = groupValue
+		updates["group_ratio_setting.group_ratio"] = groupValue
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		for k, v := range values {
-			option := Option{Key: k}
-			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
+		var registry Option
+		if groupValue != "" {
+			var err error
+			registry, err = lockDesktopGroupRegistry(tx)
+			if err != nil {
 				return err
 			}
-			option.Value = v
+		}
+		for key, value := range updates {
+			option := Option{Key: key}
+			if err := tx.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+				return err
+			}
+			option.Value = value
 			if err := tx.Save(&option).Error; err != nil {
+				return err
+			}
+		}
+		if groupValue != "" {
+			if err := reconcileDesktopGroupRegistry(tx, &registry, groupValue); err != nil {
 				return err
 			}
 		}
@@ -267,14 +316,13 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for k, v := range values {
-		if err := updateOptionMap(k, v); err != nil {
+	for key, value := range updates {
+		if err := updateOptionMap(key, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-
 func updateOptionMap(key string, value string) (err error) {
 	if key == retiredThemeOptionKey {
 		common.OptionMapRWMutex.Lock()

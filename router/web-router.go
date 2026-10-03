@@ -22,6 +22,9 @@ type WebAssets struct {
 func SetWebRouter(router *gin.Engine, assets WebAssets) {
 	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
 
+	router.GET("/auth/paseo", middleware.RouteTag("web"), middleware.GlobalWebRateLimit(), controller.DesktopBridge)
+	router.GET("/auth/paseo/complete", middleware.RouteTag("web"), middleware.GlobalWebRateLimit(), controller.DesktopBridgeComplete)
+
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 	router.Use(middleware.GlobalWebRateLimit())
 	router.Use(middleware.Cache())
