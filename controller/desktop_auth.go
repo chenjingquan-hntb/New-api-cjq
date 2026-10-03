@@ -164,7 +164,7 @@ func DesktopAuthMe(c *gin.Context) {
 		writeDesktopError(c, http.StatusUnauthorized, "AUTH_UNAUTHORIZED", "authorization required")
 		return
 	}
-	user, err := model.GetSelfUserById(identity.UserID)
+	user, err := model.GetUserById(identity.UserID, false)
 	if err != nil || user.Status != common.UserStatusEnabled {
 		writeDesktopError(c, http.StatusUnauthorized, "AUTH_UNAUTHORIZED", "authorization required")
 		return

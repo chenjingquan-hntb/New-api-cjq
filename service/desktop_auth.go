@@ -179,7 +179,7 @@ func CompleteDesktopBridgeFlow(bridgeToken string, identity AuthIdentity) (*Desk
 		if err := common.UnmarshalJsonStr(flow.Payload, &payload); err != nil {
 			return model.ErrAuthFlowInvalid
 		}
-		if err := model.ValidateAuthSessionWithTx(tx, identity); err != nil {
+		if err := model.ValidateAuthSessionWithTx(tx, model.AuthSessionIdentity{UserID: identity.UserID, SessionID: identity.SessionID, UserAuthVersion: identity.UserAuthVersion, SessionVersion: identity.SessionVersion}); err != nil {
 			return ErrLoginSessionRevoked
 		}
 		bytes := make([]byte, DesktopLoginCodeLength)
@@ -235,7 +235,7 @@ func ExchangeDesktopCode(code, verifier, ip, userAgent string) (*DesktopSession,
 	var createdSession *model.UserSession
 	var refreshSecret string
 	_, err = model.ConsumeAuthFlowWithAction(code, model.AuthFlowMatch{Purpose: model.AuthFlowPurposeDesktopCode, UserId: flow.UserId, SessionId: flow.SessionId}, func(tx *gorm.DB, _ *model.AuthFlow) error {
-		if err := model.ValidateAuthSessionWithTx(tx, payload.BrowserIdentity); err != nil {
+		if err := model.ValidateAuthSessionWithTx(tx, model.AuthSessionIdentity{UserID: payload.BrowserIdentity.UserID, SessionID: payload.BrowserIdentity.SessionID, UserAuthVersion: payload.BrowserIdentity.UserAuthVersion, SessionVersion: payload.BrowserIdentity.SessionVersion}); err != nil {
 			return ErrLoginSessionRevoked
 		}
 		var err error

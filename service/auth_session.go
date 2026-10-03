@@ -189,7 +189,7 @@ func ValidateRefreshLoginSession(rawRefreshToken string) (AuthIdentity, *model.U
 		!hmacEqualRefreshSecret(secret, session.RefreshHash) {
 		return AuthIdentity{}, nil, ErrLoginSessionRevoked
 	}
-	user, err := model.GetSelfUserById(session.UserID)
+	user, err := model.GetUserById(session.UserID, false)
 	if err != nil {
 		return AuthIdentity{}, nil, err
 	}
@@ -288,7 +288,7 @@ func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*A
 	if err != nil {
 		return nil, nil, err
 	}
-	currentUser, err := model.GetSelfUserById(session.UserID)
+	currentUser, err := model.GetUserById(session.UserID, false)
 	if err != nil {
 		return nil, nil, err
 	}
